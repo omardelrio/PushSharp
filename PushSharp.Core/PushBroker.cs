@@ -23,11 +23,13 @@ namespace PushSharp
 		
 		public PushBroker()
 		{
+            Log.Info("Built push broker");
 			registeredServices = new Dictionary<Type, List<IPushService>>();
 		}
 
 		public void RegisterService<TPushNotification>(IPushService pushService) where TPushNotification : Notification
 		{
+            Log.Info("Registering service {0}", pushService.ToString());
 			var pushNotificationType = typeof (TPushNotification);
 
 			if (registeredServices.ContainsKey(pushNotificationType))
@@ -65,6 +67,14 @@ namespace PushSharp
 
 			return null;
 		}
+
+        public void RemoveRegistration<TNotification>()
+        {
+            var type = typeof(TNotification);
+
+            if (registeredServices != null && registeredServices.ContainsKey(type))
+                registeredServices.Remove(type);
+        }
 
 		public void StopAllServices(bool waitForQueuesToFinish = true)
 		{

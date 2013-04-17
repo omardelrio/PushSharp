@@ -114,6 +114,8 @@ namespace PushSharp.Apple
 
 					Interlocked.Decrement(ref trackedNotificationCount);
 					
+                    Log.Info("After conversion - catchNotificationFailure {0} {0}", nfex, notification);
+
 					if (callback != null)
 						callback(this, new SendNotificationResult(notification, false, nfex));
 				}
@@ -129,14 +131,15 @@ namespace PushSharp.Apple
 						lock (streamWriteLock)
 						{
 							bool stillConnected = client.Connected
-											&& client.Client.Poll(0, SelectMode.SelectWrite)
+											&& client.Client.Poll(2500, SelectMode.SelectWrite)
 											&& networkStream.CanWrite;
-
+                            
 							if (!stillConnected)
 								throw new ObjectDisposedException("Connection to APNS is not Writable");
 								
 							lock (sentLock)
 							{
+                                Log.Info("Writing data to stream");
 								if (notificationData.Length > 45)
 								{
 									networkStream.Write(notificationData, 0, 45);
@@ -146,7 +149,7 @@ namespace PushSharp.Apple
 									networkStream.Write(notificationData, 0, notificationData.Length);
 								
 								networkStream.Flush();
-
+                                Log.Info("Stream Flushed");
 								sentNotifications.Add(new SentNotification(appleNotification) {Callback = callback});
 							}
 						}
@@ -158,6 +161,9 @@ namespace PushSharp.Apple
 						//If this failed, we probably had a networking error, so let's requeue the notification
 						Interlocked.Decrement(ref trackedNotificationCount);
 
+
+                        Log.Error("Connection failure {0} - {1}", cex, notification);
+
 						if (callback != null)
 							callback(this, new SendNotificationResult(notification, false, cex));
 					}
@@ -167,6 +173,8 @@ namespace PushSharp.Apple
 
 						//If this failed, we probably had a networking error, so let's requeue the notification
 						Interlocked.Decrement(ref trackedNotificationCount);
+
+                        Log.Error("Connection failure (Exception) - {0} - {1}", ex, notification);
 
 						if (callback != null)
 							callback(this, new SendNotificationResult(notification, true, ex));
@@ -225,6 +233,7 @@ namespace PushSharp.Apple
 
 							if (bytesRead > 0)
 							{
+                                Log.Info("in Reader bytes read {0}",bytesRead);
 								//We now expect apple to close the connection on us anyway, so let's try and close things
 								// up here as well to get a head start
 								//Hopefully this way we have less messages written to the stream that we have to requeue
@@ -243,9 +252,17 @@ namespace PushSharp.Apple
 								
 								//Start reading again
 								Reader();
+                                //connected = false;
 							}
 							else
 							{
+                                Log.Warning("Read 0 bytes, perhaps this is the signal to close the stream. Shutting down client and the bunch.");
+                                try { stream.Close(); stream.Dispose(); }
+                                catch { }
+
+                                try { client.Close(); stream.Dispose(); }
+                                catch { }
+
 								connected = false;
 							}
 						}
@@ -267,6 +284,7 @@ namespace PushSharp.Apple
 		void HandleFailedNotification(int identifier, byte status)
 		{
 			//Get the index of our failed notification (by identifier)
+            Log.Error("Failed notification!!! {0} - {1}", identifier, status);
 			var failedIndex = sentNotifications.FindIndex(n => n.Identifier == identifier);
 			
 			if (failedIndex < 0)
@@ -274,7 +292,7 @@ namespace PushSharp.Apple
 
 			//Get the failed notification itself
 			var failedNotification = sentNotifications[failedIndex];
-			
+            Log.Info("Failed notification {0}", failedNotification);
 			//Fail and remove the failed index from the list
 			Interlocked.Decrement(ref trackedNotificationCount);
 
@@ -298,7 +316,7 @@ namespace PushSharp.Apple
 				foreach (var n in toRequeue)
 				{
 					Interlocked.Decrement(ref trackedNotificationCount);
-
+                    Log.Info("Element in torequeue {0}!", n);
 					if (failedNotification.Callback != null)
 						failedNotification.Callback(this, new SendNotificationResult(n.Notification, true, new Exception("Sent after previously failed Notification.")) { CountsAsRequeue = false });
 				}
@@ -320,6 +338,7 @@ namespace PushSharp.Apple
 					try { Connect(); }
 					catch (Exception ex) 
 					{
+                        Log.Info("failed! {0}", ex);
 						var evt = this.OnException;
 						if (evt != null)
 							evt(this, ex);
@@ -347,8 +366,10 @@ namespace PushSharp.Apple
 								wasRemoved = true;
 								
 								Interlocked.Decrement(ref trackedNotificationCount);
-
-								if (n.Callback != null)
+                                
+                                Log.Info("Supposedly successful {0}", n.Notification.DeviceToken);
+								
+                                if (n.Callback != null)
 									n.Callback(this, new SendNotificationResult(n.Notification));
 
 								sentNotifications.RemoveAt(0);
@@ -360,6 +381,7 @@ namespace PushSharp.Apple
 						{
 							//In fact, if we weren't connected, bump up the sentat timestamp
 							// so that we wait awhile after reconnecting to expire this message
+                            Log.Info("Bumping notification time - was not CONNECTED");
 							try { sentNotifications[0].SentAt = DateTime.UtcNow; }
 							catch { }
 						}
@@ -394,8 +416,10 @@ namespace PushSharp.Apple
 				catch (ConnectionFailureException ex)
 				{
 					connected = false;
-
-					//Report the error
+                    
+                    Log.Info("Connection Failure in Connect {0} ", ex);
+					
+                    //Report the error
 					var cf = this.OnConnectionFailure;
 
 					if (cf != null)
@@ -429,12 +453,15 @@ namespace PushSharp.Apple
 
 					//Increase the delay by the exponential backoff multiplier
 					reconnectDelay = (int)(reconnectBackoffMultiplier * reconnectDelay);
+                    Log.Info("Reconnecting {0} ", reconnectDelay);
 				}
 				else
 				{
+
 					//Reset connect delay
 					reconnectDelay = initialReconnectDelay;
 
+                    Log.Info("Connecting {0} ", reconnectDelay);
 					//Notify we are connected
 					var eoc = this.OnConnected;
 					if (eoc != null)
@@ -451,7 +478,9 @@ namespace PushSharp.Apple
 			var eoc = this.OnConnecting;
 			if (eoc != null)
 				eoc(this.appleSettings.Host, this.appleSettings.Port);
-			
+
+            Log.Info("Connecting ");
+
 			try
 			{
 				var connectDone = new AutoResetEvent(false);
@@ -459,34 +488,36 @@ namespace PushSharp.Apple
 				//Connect async so we can utilize a connection timeout
 				client.BeginConnect(
 					appleSettings.Host, appleSettings.Port,
-					new AsyncCallback(
-						delegate(IAsyncResult ar)
-						{
-							try
-							{
-								client.EndConnect(ar);
+					ar =>
+					    {
+					        try
+					        {
+					            client.EndConnect(ar);
 
-								//Set keep alive on the socket may help maintain our APNS connection
-								client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+					            //Set keep alive on the socket may help maintain our APNS connection
+					            client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
 
-								//Trigger the reset event so we can continue execution below
-								connectDone.Set();
-							}
-							catch (Exception ex)
-							{
-								Log.Error("APNS Connect Callback Failed: " + ex);
-							}
-						}
-					), client
+					            //client.Client.SetKeepAlive(1000, 2500);
+
+					            //Trigger the reset event so we can continue execution below
+					            connectDone.Set();
+					        }
+					        catch (Exception ex)
+					        {
+					            Log.Error("APNS Connect Callback Failed: " + ex);
+					        }
+					    }, client
 				);
 
 				if (!connectDone.WaitOne(appleSettings.ConnectionTimeout))
 				{
+                    Log.Info("Timeout!");
 					throw new TimeoutException("Connection to Host Timed Out!");
 				}
 			}
 			catch (Exception ex)
 			{
+                Log.Info("failed!");
 				throw new ConnectionFailureException("Connection to Host Failed", ex);
 			}
 			
@@ -542,4 +573,6 @@ namespace PushSharp.Apple
 
 		public SendNotificationCallbackDelegate Callback { get; set; }
 	}
+
+   
 }
